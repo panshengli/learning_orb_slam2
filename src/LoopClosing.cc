@@ -40,6 +40,7 @@ LoopClosing::LoopClosing(Map *pMap, KeyFrameDatabase *pDB, ORBVocabulary *pVoc, 
     mpKeyFrameDB(pDB), mpORBVocabulary(pVoc), mpMatchedKF(NULL), mLastLoopKFid(0), mbRunningGBA(false), mbFinishedGBA(true),
     mbStopGBA(false), mpThreadGBA(NULL), mbFixScale(bFixScale), mnFullBAIdx(0)
 {
+    // 是否我们在三个当前的关键帧内都同时发现了某一个闭环候选帧的话，那么就表明当前的SLAM系统已经闭环。
     mnCovisibilityConsistencyTh = 3;
 }
 
@@ -64,6 +65,10 @@ void LoopClosing::Run()
         if(CheckNewKeyFrames())
         {
             // Detect loop candidates and check covisibility consistency
+            // 我们计算关键帧Ki和在Covisibility Graph中与其相连的关键帧之间的词袋(BOW)之间的相似度。
+            // 本文中，作者离线训练了大量的基于ORB描述的词袋，在程序运行时加载进去。
+            // 这里的词袋作为对该关键帧的描述，将闭环检测转变为一个类似于模式识别的问题。
+            // 当相机再次来到之前到过的场景时，就会因为看到相同的景物，而得到类似的词袋描述，从而检测到闭环。
             if(DetectLoop())
             {
                // Compute similarity transformation [sR|t]
@@ -110,7 +115,9 @@ bool LoopClosing::DetectLoop()
         mpCurrentKF->SetNotErase();
     }
 
-    //If the map contains less than 10 KF or less than 10 KF have passed from last loop detection
+    // If the map contains less than 10 KF or less than 10 KF have passed 
+    // from last loop detection
+    // 如果地图中的关键帧数小于10，那么不进行闭环检测
     if(mpCurrentKF->mnId<mLastLoopKFid+10)
     {
         mpKeyFrameDB->add(mpCurrentKF);
@@ -122,6 +129,7 @@ bool LoopClosing::DetectLoop()
     // This is the lowest score to a connected keyframe in the covisibility graph
     // We will impose loop candidates to have a higher similarity than this
     const vector<KeyFrame*> vpConnectedKeyFrames = mpCurrentKF->GetVectorCovisibleKeyFrames();
+    // 获取共视关键帧，并计算他们和当前关键帧之间的BoW分数，求得最低分
     const DBoW2::BowVector &CurrentBowVec = mpCurrentKF->mBowVec;
     float minScore = 1;
     for(size_t i=0; i<vpConnectedKeyFrames.size(); i++)
@@ -138,6 +146,7 @@ bool LoopClosing::DetectLoop()
     }
 
     // Query the database imposing the minimum score
+    // 通过上一步计算出的最低分数到数据库中查找出候选关键帧，这一步相当于是找到了曾经到过此处的关键帧们
     vector<KeyFrame*> vpCandidateKFs = mpKeyFrameDB->DetectLoopCandidates(mpCurrentKF, minScore);
 
     // If there are no loop candidates, just add new keyframe and return false
@@ -160,7 +169,6 @@ bool LoopClosing::DetectLoop()
     for(size_t i=0, iend=vpCandidateKFs.size(); i<iend; i++)
     {
         KeyFrame* pCandidateKF = vpCandidateKFs[i];
-
         set<KeyFrame*> spCandidateGroup = pCandidateKF->GetConnectedKeyFrames();
         spCandidateGroup.insert(pCandidateKF);
 
@@ -191,6 +199,8 @@ bool LoopClosing::DetectLoop()
                     vCurrentConsistentGroups.push_back(cg);
                     vbConsistentGroup[iG]=true; //this avoid to include the same group more than once
                 }
+                // 连续性检测的意思就是，是否我们在三个当前的关键帧内都同时发现了某一个闭环候选帧的话，
+                // 那么就表明当前的SLAM系统已经闭环。
                 if(nCurrentConsistency>=mnCovisibilityConsistencyTh && !bEnoughConsistent)
                 {
                     mvpEnoughConsistentCandidates.push_back(pCandidateKF);
@@ -261,7 +271,13 @@ bool LoopClosing::ComputeSim3()
             vbDiscarded[i] = true;
             continue;
         }
+        // 函数主要工作就是在当前关键帧和闭环帧之间找到更多的对应点，
+        // 并通过这些对应点计算当前关键帧和闭环帧之间的Sim3变换，求解出Rt和s。
+        // 在这一过程中，共进行了三次对应点的查找工作。
 
+        // 对每一个闭环帧，通过BoW的matcher方法进行第一次匹配，匹配闭环帧和当前关键帧之间的匹配关系，
+        // 如果对应关系少于20个，则丢弃，否则构造一个Sim3求解器并保存起来。
+        // 这一步主要是对效果较好的闭环帧构建Sim3求解器
         int nmatches = matcher.SearchByBoW(mpCurrentKF,pKF,vvpMapPointMatches[i]);
 
         if(nmatches<20)
@@ -293,6 +309,12 @@ bool LoopClosing::ComputeSim3()
             KeyFrame* pKF = mvpEnoughConsistentCandidates[i];
 
             // Perform 5 Ransac Iterations
+            // 对上一步得到的每一个满足条件的闭环帧，通过RANSAC迭代，求解Sim3
+            // 对于这里的Sim3的Ransac迭代，我在网上也没有找到很多的解释，
+            // 我们都知道Ransac是根据一组包含异常数据的样本数据集，
+            // 计算出数据的数学模型参数的方法，
+            // 在这里使用Ransac的方法，可以大大提高对杂点干扰的鲁棒性。
+
             vector<bool> vbInliers;
             int nInliers;
             bool bNoMore;
@@ -316,13 +338,17 @@ bool LoopClosing::ComputeSim3()
                     if(vbInliers[j])
                        vpMapPointMatches[j]=vvpMapPointMatches[i][j];
                 }
-
+                // 通过返回的Sim3进行第二次匹配。
+                // 刚才得到了Sim3，所以现在要利用Sim3再去进行匹配点的查找，
+                // 本次查找的匹配点数量，会在原来的基础上有所增加。
                 cv::Mat R = pSolver->GetEstimatedRotation();
                 cv::Mat t = pSolver->GetEstimatedTranslation();
                 const float s = pSolver->GetEstimatedScale();
                 matcher.SearchBySim3(mpCurrentKF,pKF,vpMapPointMatches,s,R,t,7.5);
 
                 g2o::Sim3 gScm(Converter::toMatrix3d(R),Converter::toVector3d(t),s);
+                // 使用非线性最小二乘法优化Sim3.
+                // 在拿到了第二次匹配的结果以后，要通过这些匹配点，再去优化Sim3的值，从而再精细化Rt和s。 
                 const int nInliers = Optimizer::OptimizeSim3(mpCurrentKF, pKF, vpMapPointMatches, gScm, 10, mbFixScale);
 
                 // If optimization is succesful stop ransacs and continue
@@ -350,6 +376,7 @@ bool LoopClosing::ComputeSim3()
     }
 
     // Retrieve MapPoints seen in Loop Keyframe and neighbors
+    // 恢复闭环关键帧和其邻居关键帧的MapPoint地图点 
     vector<KeyFrame*> vpLoopConnectedKFs = mpMatchedKF->GetVectorCovisibleKeyFrames();
     vpLoopConnectedKFs.push_back(mpMatchedKF);
     mvpLoopMapPoints.clear();
@@ -372,6 +399,8 @@ bool LoopClosing::ComputeSim3()
     }
 
     // Find more matches projecting with the computed Sim3
+    // 使用投影得到更多的匹配点，如果匹配点数量充足，则接受该闭环。
+    // 最后我们通过投影匹配得到了尽可能多的匹配点，通过匹配点的数量判断是否接受闭环。 
     matcher.SearchByProjection(mpCurrentKF, mScw, mvpLoopMapPoints, mvpCurrentMatchedPoints,10);
 
     // If enough matches accept Loop
@@ -405,6 +434,9 @@ void LoopClosing::CorrectLoop()
 
     // Send a stop signal to Local Mapping
     // Avoid new keyframes are inserted while correcting the loop
+    // 在上一步求得了Sim3和对应点之后，就纠正了当前帧的位姿，
+    // 但是我们的误差不仅仅在当前帧，此前的每一帧都有累计误差需要消除，
+    // 所以这个函数CorrectLoop就是用来消除这个累计误差，进行整体的调节。
     mpLocalMapper->RequestStop();
 
     // If a Global Bundle Adjustment is running, abort it
@@ -564,6 +596,7 @@ void LoopClosing::CorrectLoop()
     }
 
     // Optimize graph
+    // 使用非线性最小二乘图优化的方法来优化EssentialGraph
     Optimizer::OptimizeEssentialGraph(mpMap, mpMatchedKF, mpCurrentKF, NonCorrectedSim3, CorrectedSim3, LoopConnections, mbFixScale);
 
     mpMap->InformNewBigChange();

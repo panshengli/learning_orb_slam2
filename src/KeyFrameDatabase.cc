@@ -75,11 +75,14 @@ void KeyFrameDatabase::clear()
 
 vector<KeyFrame*> KeyFrameDatabase::DetectLoopCandidates(KeyFrame* pKF, float minScore)
 {
+    // 得到与当前帧的链接的关键帧
     set<KeyFrame*> spConnectedKeyFrames = pKF->GetConnectedKeyFrames();
     list<KeyFrame*> lKFsSharingWords;
 
     // Search all keyframes that share a word with current keyframes
     // Discard keyframes connected to the query keyframe
+    // 在地图中搜索与当前关键帧共享一个BOW word的关键帧，并排除上一步搜集到的附近关键帧，
+    // 得到候选帧，这些候选帧基本上都是曾经来到此处看到的。 
     {
         unique_lock<mutex> lock(mMutex);
 
@@ -110,18 +113,22 @@ vector<KeyFrame*> KeyFrameDatabase::DetectLoopCandidates(KeyFrame* pKF, float mi
     list<pair<float,KeyFrame*> > lScoreAndMatch;
 
     // Only compare against those keyframes that share enough words
+    // 统计这些帧中，与当前关键帧的Bow共有Word最多的单词数maxCommonWords。 
     int maxCommonWords=0;
     for(list<KeyFrame*>::iterator lit=lKFsSharingWords.begin(), lend= lKFsSharingWords.end(); lit!=lend; lit++)
     {
         if((*lit)->mnLoopWords>maxCommonWords)
             maxCommonWords=(*lit)->mnLoopWords;
     }
-
+    // 计算最低共有单词数阈值minCommonWords = maxCommonWords*0.8f，
+    // 并搜寻候选帧中，共有单词数大于minCommonWords的关键帧，并计算它与当前帧的score分值。 
     int minCommonWords = maxCommonWords*0.8f;
 
     int nscores=0;
 
     // Compute similarity score. Retain the matches whose score is higher than minScore
+    // 会把一些拥有很高分数的独立出来的关键帧给去掉，因为他并没有跟其他关键帧相连，
+    // 没有连续性，所以这一步就是去除这些得分很高的错误关键帧。 
     for(list<KeyFrame*>::iterator lit=lKFsSharingWords.begin(), lend= lKFsSharingWords.end(); lit!=lend; lit++)
     {
         KeyFrame* pKFi = *lit;
@@ -173,6 +180,8 @@ vector<KeyFrame*> KeyFrameDatabase::DetectLoopCandidates(KeyFrame* pKF, float mi
     }
 
     // Return all those keyframes with a score higher than 0.75*bestScore
+    // 得到最后一个阈值 minScoreToRetain = 0.75f*bestAccScore，
+    // 再通过这个最低阈值，计算出这些候选帧中比这个分值高的关键帧，并保存起来返回。 
     float minScoreToRetain = 0.75f*bestAccScore;
 
     set<KeyFrame*> spAlreadyAddedKF;
