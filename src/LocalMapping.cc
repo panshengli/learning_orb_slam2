@@ -658,6 +658,11 @@ void LocalMapping::KeyFrameCulling()
     //（2）如果一个地图点被构建，它必须被超过三个关键帧观察到（在代码中，可以发现如果是单摄像头，这个阈值被设置为2）。
     // 一旦地图点被创建了，就只有在少于3个关键帧能够观察到该点时才会被剔除。
     // 而要剔除关键帧，通常是在局部集束调整剔除外点或者在后面剔除关键帧时才会发生。
+
+    // 为了控制重建的紧凑度，LocalMapping会去检测冗余的关键帧，然后删除它们。
+    // 这样的话会有利于控制，随着关键帧数目增长后，集束调整的复杂度。
+    // 因为除非视角改变了，否则关键帧的数量在相同的环境中不应该无休止地增长。
+    // 本文将那些有90%的点能够被超过三个关键帧观察到的关键帧认为是冗余关键帧，并将其删除
     vector<KeyFrame*> vpLocalKeyFrames = mpCurrentKeyFrame->GetVectorCovisibleKeyFrames();
 
     for(vector<KeyFrame*>::iterator vit=vpLocalKeyFrames.begin(), vend=vpLocalKeyFrames.end(); vit!=vend; vit++)
